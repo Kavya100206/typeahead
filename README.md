@@ -11,6 +11,26 @@ consistent hashing, batch writes, recency scoring).
 See [docs/architecture.md](docs/architecture.md) for the full design and
 [docs/performance-report.md](docs/performance-report.md) for measured numbers.
 
+## Screenshots
+
+**Trending on focus.** Clicking the empty search box shows trending searches
+(popular queries when there is no recent activity).
+
+![Trending searches on focus](docs/screenshots/trending.png)
+
+**Live suggestions.** Typing a prefix shows the top matches ranked by count.
+
+![Suggestions for the prefix "ip"](docs/screenshots/suggestions.png)
+
+**Recency-aware ranking and search submit.** The enhanced toggle switches to the
+trending-aware ranking; submitting a search shows the confirmation.
+
+![Enhanced ranking and a submitted search](docs/screenshots/enhanced-search.png)
+
+**API docs.** FastAPI serves interactive Swagger docs at `/docs`.
+
+![Auto-generated API docs](docs/screenshots/api-docs.png)
+
 ## Architecture
 
 The one fact that drives the design: reads vastly outnumber writes (every
