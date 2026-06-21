@@ -1,88 +1,382 @@
-# Search Typeahead
+# Search Typeahead, Project Report
 
-A search typeahead system: as you type, it shows the top suggestions for your
-prefix, ranked by all-time popularity or by a recency-aware score. Built to learn
-and explain the HLD concepts behind it (trie + top-k, cache-aside + TTL,
-consistent hashing, batch writes, recency scoring).
+This is a search typeahead system, the kind of thing that powers the suggestions
+dropdown under a search box. As you type, it shows the most relevant queries that
+start with what you have typed so far, and it updates live. When you actually
+submit a search, it records that so popularity stays current, and it has a
+trending view that surfaces queries getting a lot of recent attention.
 
-- Backend: Python + FastAPI, SQLite, in-process cache.
-- Frontend: plain TypeScript (no framework, no bundler), compiled with `tsc`.
+I built it to learn the systems-design ideas behind a real typeahead: prefix
+tries, top-k ranking, caching, consistent hashing, batched writes, and
+recency-aware scoring. The backend is Python and FastAPI with SQLite. The
+frontend is plain TypeScript with no framework and no bundler.
 
-See [docs/architecture.md](docs/architecture.md) for the design and
-[docs/performance-report.md](docs/performance-report.md) for measured numbers.
+The one idea that shaped every decision is that reads vastly outnumber writes.
+Every keystroke is a read. Only a search submit is a write. So the read path is
+optimized hard, and writes are allowed to be slower or delayed.
 
-## Layout
+---
+
+## 1. Architecture
+
+### The picture
 
 ```
-backend/
-  app/            FastAPI app, trie, store, cache, batch writer, trending
-  scripts/        dataset generator + demos + benchmark
-  data/           queries.csv (dataset) and queries.db (SQLite)
-frontend/
-  src/*.ts        debounce, api, ui, main
-  index.html, style.css
-docs/             architecture + performance report
+  browser ── debounce ──> GET /suggest?q=<prefix>&mode=basic|enhanced
+     ^                          |
+     | top 10                   v
+     |                   +--------------+   hit
+     |                   | CacheClient  |--------> return cached top-10
+     |                   |  + hash ring |
+     |                   +------+-------+   miss
+     |                          v
+     |                   Trie.top_k(prefix)  -- fills cache --> return
+     |
+  Enter / click ──> POST /search ──> BatchWriter.enqueue(query)
+                                       aggregate query -> delta
+                                       flush on size OR timer
+                                          |
+                                          v
+                                   SQLite store (query -> count)
+                                   + Trie re-rank
+  GET /trending ──> log(popularity) + weight * recency, over popular + recent
 ```
 
-## Prerequisites
+### The components
 
-- Python 3.10+
-- Node 18+ (only to compile the TypeScript; the page itself runs framework-free)
+Each file does one job.
 
-## Backend
+| Component | File | What it does |
+|-----------|------|--------------|
+| Trie | `backend/app/trie.py` | prefix matching with a precomputed top-k list at every node |
+| Primary store | `backend/app/store.py` | durable `query -> count` in SQLite, the source of truth |
+| Cache node | `backend/app/cache/cache_node.py` | one in-memory cache with TTL and hit/miss counters |
+| Hash ring | `backend/app/cache/ring.py` | consistent hashing, maps a prefix to a cache node |
+| Cache client | `backend/app/cache/cache_client.py` | the read-path front door, routes to the owning node |
+| Batch writer | `backend/app/batch_writer.py` | buffers and aggregates writes, flushes in bulk |
+| Trending | `backend/app/trending.py` | recency scoring with exponential time decay |
+| Ingest | `backend/app/ingest.py` | loads the dataset into the store, builds the trie |
+| API | `backend/app/main.py` | the FastAPI routes |
+| Frontend | `frontend/src/*.ts` | the UI, debouncing, keyboard nav, the dropdown |
+
+### The read path
+
+When a request for `/suggest?q=ip` comes in, the prefix is normalized (lowercased
+and trimmed). The cache client hashes the prefix on the ring to find which cache
+node owns it. If that node has the answer and it has not expired, it comes
+straight back. On a miss, the trie walks the prefix node, reads its precomputed
+top-10 list, fills the cache, and returns. The expensive lookup happens once, and
+repeat requests for the same prefix ride the cache.
+
+If the request asks for `mode=enhanced`, it skips the cache and computes a
+recency-aware ranking instead, because trending scores change too fast to cache
+usefully.
+
+### The write path
+
+A search submit goes to `/search`, which drops the query into the batch writer
+and returns immediately. There is no disk write on the request itself. Submits
+pile up in an in-memory map of query to a running count. The buffer flushes when
+it reaches a size threshold or when a timer fires, whichever comes first. A flush
+applies all the buffered counts to SQLite in one transaction and re-ranks the
+affected trie nodes. The trending tracker is updated on every submit separately,
+in memory, so recency is live even though the durable count lags behind the
+flush.
+
+---
+
+## 2. Dataset
+
+### Source
+
+The dataset is synthetic, generated by `backend/scripts/generate_dataset.py`. I
+went with generated data on purpose so it has the two properties a typeahead
+needs to actually exercise the code:
+
+- Prefix overlap. Many queries share leading characters (iphone, ipad, ipod, ip
+  address), so the trie and the top-k logic get a real workout.
+- Skewed counts. A handful of queries are very popular and there is a long tail of
+  rare ones, following a Zipf-like 1/rank curve. This makes ranking by count
+  meaningful and makes the cache hit rate realistic.
+
+The generator builds queries from popular "head" terms (iphone, java, amazon,
+cricket score, and so on) combined with modifier words (price, review, near me,
+2025, and so on). It writes about 120,000 rows to `backend/data/queries.csv` in a
+simple `query,count` format with a header. The seed is fixed, so the dataset is
+the same every time you generate it.
+
+If you wanted real data instead, an open query log like the AOL search log, or a
+dump of product or Wikipedia titles aggregated to counts, would drop in with no
+code changes. The loader only cares about the `query,count` shape.
+
+### Loading
 
 ```bash
 cd backend
 pip install -r requirements.txt
 
-# One time: generate the dataset (~120k rows) and load it into SQLite.
-python scripts/generate_dataset.py
-python -m app.ingest
+python scripts/generate_dataset.py   # writes data/queries.csv (~120k rows)
+python -m app.ingest                 # loads the CSV into SQLite (data/queries.db)
+```
 
-# Run the API (rebuilds the trie from the store on startup, ~12s).
+`ingest` reads the CSV, normalizes each query, and bulk-loads it into the SQLite
+store in one batch. The store is the durable source of truth. The trie itself is
+not persisted. It gets rebuilt from the store every time the server starts, which
+takes around twelve seconds for the full dataset.
+
+---
+
+## 3. API
+
+The server runs on `http://localhost:8000`. FastAPI also serves interactive docs
+at `/docs`.
+
+| Endpoint | What it returns |
+|----------|------------------|
+| `GET /suggest?q=<prefix>&mode=basic\|enhanced` | up to 10 suggestions for the prefix. `basic` ranks by all-time count and is cached. `enhanced` is the recency-aware ranking and is recomputed each call. |
+| `POST /search` with body `{"query": "..."}` | records the query through the batch writer and returns `{"message": "Searched"}`. |
+| `GET /trending?k=10` | the current trending queries, ranked by popularity plus recent activity. |
+| `GET /cache/debug?prefix=<p>` | which cache node owns the prefix, and whether that node currently holds it (hit or miss). |
+| `GET /stats` | batch-writer submits versus actual DB writes, and the cache hit and miss numbers. |
+
+A few details worth calling out. The suggest endpoint handles the awkward inputs
+gracefully: empty input and a missing `q` both return an empty list rather than an
+error, mixed case is normalized so "JAVA" and "java" hit the same node, and a
+prefix with no matches returns an empty list, not a 404. The search endpoint also
+accepts an empty query without complaining, it just records nothing.
+
+Example:
+
+```bash
+curl "http://localhost:8000/suggest?q=ip"
+# {"prefix":"ip","suggestions":[{"query":"iphone","count":1000000}, ...],"source":"cache"}
+
+curl -X POST "http://localhost:8000/search" -H "Content-Type: application/json" -d '{"query":"java"}'
+# {"message":"Searched"}
+```
+
+---
+
+## 4. Design choices and trade-offs
+
+This is the part I care about most, because the point of the project was being
+able to explain why each piece is the way it is.
+
+### Trie with precomputed top-k, instead of computing top-k per query
+
+A trie gets me to the prefix node in time proportional to the prefix length. The
+question is what to do once I am there. The naive way is to walk the whole subtree
+of completions and pick the best 10 with a heap, which is fine but does real work
+on every read. Instead, every node stores its own precomputed top-10. A read is
+then a walk to the node plus reading a list, basically O(prefix length). The cost
+is paid on writes: inserting a query has to refresh the top-k on every node along
+its path, and it uses more memory. Since reads dominate, that trade is the right
+way round.
+
+This choice is also where I hit my first real performance problem. Building the
+trie for 120k rows took about three minutes at first, because the original insert
+re-sorted every node with a Python lambda on every single insert. Switching to
+storing the count negated so a plain tuple sort works, inserting in place with
+bisect instead of re-sorting, and skipping nodes where the new entry cannot crack
+the top-k, brought it down to about twelve seconds. Same algorithm, much better
+constant factor.
+
+### Trie versus a flat prefix-to-top-k store
+
+There is a well-known HLD framing where you skip the trie entirely and store a
+plain key-value map from prefix to its top-k list, which is what a system like
+Redis does. The thing I came to understand is that these are the same data. A trie
+node is a prefix, and its precomputed top-k is exactly the value you would cache
+for that prefix. A trie is just the shared-prefix-compressed, single-machine form
+of that key-value store. At large scale you cannot shard a tree cleanly and no
+database is built for tries, so you flatten it into a hashmap and shard by
+hash(prefix). That is precisely what my cache layer and consistent-hash ring do.
+So the system implements the distributed prefix cache, with the trie as its
+in-memory source.
+
+### Cache-aside with TTL, instead of explicit invalidation
+
+The cache uses the cache-aside pattern: check the cache, on a miss read the
+source and fill the cache, then return. Entries carry a TTL and a read past expiry
+counts as a miss. The honest reason a cache exists here at all is partly to learn
+the pattern, since the trie is already fast on a single box. The pattern matters
+because in a real system the suggestion source is often slow or remote.
+
+I chose TTL over pinpoint invalidation because invalidation is genuinely hard:
+when one query's count changes, working out exactly which prefixes need their
+cached top-k dropped is fiddly. TTL is simpler and good enough, the trade being
+that data can be stale for up to the TTL window. Trending sidesteps the staleness
+entirely by recomputing instead of caching.
+
+### Consistent hashing, instead of hash modulo N
+
+The obvious way to route a prefix to one of N cache nodes is hash(prefix) % N. The
+problem is that when N changes, almost every key moves to a different node, which
+in a cache means a near-total miss storm at the worst possible time, right when
+you are scaling. A consistent-hash ring fixes this. Nodes and keys are placed on a
+circle, and a key is owned by the first node clockwise from it. Adding or removing
+a node only moves the keys in that one node's arc, about K/N of them. Virtual
+nodes (each physical node placed at many positions) keep the load even. I measured
+this: adding a fifth node to four remapped about 17 percent of keys with the ring,
+versus about 80 percent with modulo.
+
+### Batched writes, instead of writing on every submit
+
+The first version of the write path wrote to SQLite synchronously on every
+submit. That ties request latency to disk and hammers hot rows: a popular query
+submitted a thousand times is a thousand commits to the same row. The batch writer
+buffers submits in a map of query to delta, aggregating duplicates, and flushes in
+bulk. A flush is one transaction regardless of how many queries it carries. In a
+demo of 1000 submits it dropped the write count to about 10, a 100x reduction.
+
+This is the same idea as an LSM tree's memtable: batch writes in memory, flush in
+bulk, turn many small random writes into few sequential ones. The catch is
+durability. The buffer is in memory, so a crash before a flush loses those counts.
+I am honest about that and mitigate it by flushing on shutdown. A production
+system would add a write-ahead log, which is exactly what real LSM systems do.
+Because writes are delayed, a just-submitted query may not appear in suggestions
+until the next flush, so this path is eventually consistent.
+
+### Trending with time decay and a popularity baseline
+
+Ranking trending purely by all-time count is wrong, since an old giant would
+dominate forever and nothing new could rise. Ranking purely by recent activity is
+also wrong, because then a single search of an obscure query would jump to the top
+of the trending list, ahead of genuinely popular queries.
+
+So the trending score combines both:
+
+```
+score(q) = log(1 + all_time_count(q)) + weight * recent_activity(q)
+```
+
+The log of the count gives every query a popularity baseline and compresses the
+huge count range so a real surge can compete. The recent activity term is a
+decayed sum of recent searches, where each search adds about 1 and the score
+shrinks over time on an exponential curve set by a half-life. This gives the
+behavior I want. A query searched once adds a negligible amount and stays near the
+bottom. A sustained spike accumulates, climbs above the popular set, and then
+fades on its own once the searches stop. I picked time decay over a sliding window
+because decay is one cheap number per query, where a window needs per-bucket
+bookkeeping.
+
+The recency weight is a single tunable constant. Higher means spikes dominate
+sooner, lower means a query needs more sustained activity to climb. I set it so a
+single search is negligible but roughly ten or more recent searches clearly move
+the needle.
+
+### Frontend without a framework
+
+The UI is small: a search box, a dropdown, debouncing, keyboard navigation, and a
+trending view. A framework would add machinery I would then have to justify, so I
+wrote the DOM updates by hand. The one piece of real logic is debouncing, which
+waits until typing pauses before firing a request, so typing "iphone" sends one
+request instead of six. There is also a guard for out-of-order responses: each
+request carries a sequence number and a response only renders if it is still the
+latest, so a slow response cannot overwrite fresher suggestions.
+
+The dropdown behaves like a real search box. An empty, focused box shows trending.
+Typing replaces it with suggestions in the same dropdown. Clearing the box brings
+trending back, with no refocus needed.
+
+### Where the system is eventually consistent
+
+Two places. The cache and the store can disagree for up to a TTL window, and
+batched writes land after the submit that triggered them. So the read path is
+eventually consistent, which I trade for low latency and far fewer writes. On a
+single box this is a deliberate choice rather than a partition-tolerance claim, the
+classic latency versus freshness trade.
+
+---
+
+## 5. Performance
+
+All numbers come from `backend/scripts/benchmark.py` against a local server,
+SQLite, in-process cache, on a single Windows machine with the full dataset. To
+reproduce: start the server, then run the benchmark.
+
+### Suggest latency, mean and p95
+
+| Pass | mean | p95 |
+|------|------|-----|
+| miss (cold, trie walk plus cache fill) | 13.28 ms | 13.39 ms |
+| hit (warm, served from cache) | 10.51 ms | 13.92 ms |
+
+Hits are a few milliseconds faster than misses, which is what you would expect, a
+dict lookup versus a trie walk and fill. The honest read of these numbers is that
+both are dominated by per-request HTTP round-trip overhead on localhost, not by
+the cache or trie work, which is sub-millisecond. On a single box the cache's win
+is real but small because the trie is already fast. The cache earns its keep when
+the suggestion source is slow or remote, which is the case the pattern exists for.
+
+I report p95 rather than the mean because the mean hides the slow tail. p95 means
+95 percent of requests were at least this fast, so it describes the experience of
+the unlucky few. Here p95 sits close to the mean, which tells me the latency is
+consistent with no long tail on this workload. You compute it by sorting the
+timings and taking the value at the 95th percentile index.
+
+### Cache hit rate
+
+Over 2000 reads with a realistic skew, 80 percent aimed at a small set of popular
+prefixes and 20 percent at a random tail:
+
+```
+hits=1991  misses=9  hit_rate=99.6%
+```
+
+Prefix traffic is heavily skewed, so a few popular prefixes repeat constantly and
+are almost always already cached. A miss only happens the first time a prefix is
+seen or after its TTL expires. 99.6 percent matches the expectation that typeahead
+reads are extremely cache-friendly.
+
+### Write reduction from batching
+
+600 submits across 6 distinct queries, batch size 100:
+
+```
+submits=600  db_writes=6  reduction=100x
+```
+
+The naive path would have done 600 synchronous commits. The batch writer
+aggregated by query and flushed in bulk, so the same load cost 6 DB writes. The
+trade, again, is eventual consistency: a submit is not durable until the next
+flush.
+
+### Summary
+
+| Metric | Result | Why it matters |
+|--------|--------|----------------|
+| suggest p95 (hit) | about 14 ms, mostly HTTP overhead | reads feel instant |
+| cache hit rate | 99.6 percent | popular prefixes repeat, reads stay cheap |
+| write reduction | 100x | database load drops sharply under batching |
+
+All three follow from the design: precomputed top-k for fast reads, a distributed
+cache for repeat prefixes, and an aggregating batch writer for cheap writes.
+
+---
+
+## Running it
+
+Backend:
+
+```bash
+cd backend
+pip install -r requirements.txt
+python scripts/generate_dataset.py   # first time only
+python -m app.ingest                 # first time only
 python -m uvicorn app.main:app --port 8000
 ```
 
-API docs are auto-generated at http://localhost:8000/docs.
-
-## Frontend
+Frontend:
 
 ```bash
 cd frontend
 npm install
-npm run build        # compiles src/*.ts -> dist/*.js  (use `npm run watch` while developing)
+npm run build
 python -m http.server 5500
 ```
 
-Open http://localhost:5500. Type to see suggestions; tick "Recency-aware ranking"
-to switch to the enhanced ranking; the trending panel updates as searches come in.
-
-## API
-
-| Endpoint | Returns |
-|----------|---------|
-| `GET /suggest?q=<prefix>&mode=basic\|enhanced` | up to 10 suggestions; `basic` = all-time count (cached), `enhanced` = recency-aware blend |
-| `POST /search` `{"query": "..."}` | `{"message": "Searched"}`; records the query via the batch writer |
-| `GET /trending?k=10` | current trending queries by decayed recency score |
-| `GET /cache/debug?prefix=<p>` | which cache node owns the prefix, and hit/miss |
-| `GET /stats` | batch-writer submits vs DB writes, and cache hit/miss |
-
-Edge cases handled by `/suggest`: empty input, missing `q`, mixed case
-(normalized), and a prefix with no matches (empty list, not an error).
-
-## Dataset
-
-`scripts/generate_dataset.py` writes `data/queries.csv` (`query,count`, ~120k
-rows) with prefix overlap and Zipf-like skew so the trie and ranking are actually
-exercised. `python -m app.ingest` loads the CSV into SQLite; the trie is rebuilt
-from SQLite on every server start.
-
-## Demos and benchmark
-
-```bash
-cd backend
-python scripts/remap_demo.py      # consistent hashing: ~17% remap vs ~80% for hash % N
-python scripts/batch_demo.py      # batching: 1000 submits -> ~10 DB writes (100x)
-python scripts/trending_demo.py   # a cold query rises on recency, then fades
-python scripts/benchmark.py       # latency p95, cache hit rate, write reduction (server must be running)
-```
+Then open `http://localhost:5500`. There are also four scripts under
+`backend/scripts` that demonstrate the individual ideas: `remap_demo.py` for
+consistent hashing, `batch_demo.py` for batching, `trending_demo.py` for the rise
+and fade of a spike, and `benchmark.py` for the numbers above.
