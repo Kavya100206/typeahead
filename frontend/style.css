@@ -1,0 +1,168 @@
+/* Plain, readable styling. System fonts, one accent, subtle borders. No
+   gradients or animations beyond a basic hover. The point is a clean, real
+   search box, not a showcase. */
+
+:root {
+  --border: #d0d0d0;
+  --border-focus: #4a4a4a;
+  --bg: #ffffff;
+  --text: #1a1a1a;
+  --muted: #6b7280;
+  --active: #f0f0f0;
+  --error: #b91c1c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--text);
+  background: #fafafa;
+}
+
+.page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 64px 16px;
+}
+
+h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+
+/* Input and button on one row; the wrapper grows, the button stays its size. */
+.search-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+/* Positioned wrapper so the dropdown anchors to the input below it. */
+.search-wrap {
+  position: relative;
+  flex: 1;
+}
+
+#search {
+  width: 100%;
+  padding: 12px 14px;
+  font-size: 1rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+
+#search:focus {
+  border-color: var(--border-focus);
+}
+
+/* Hidden until ui.ts adds the .open class. */
+.suggestions {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+  z-index: 10;
+}
+
+.suggestions.open {
+  display: block;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+/* Same highlight for hover and keyboard, so they feel identical. */
+.row:hover,
+.row.active {
+  background: var(--active);
+}
+
+.row .query {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row .count {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* Loading / empty / error all share one muted row style. */
+.status {
+  padding: 10px 14px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.status-error {
+  color: var(--error);
+}
+
+#search-btn {
+  padding: 0 18px;
+  font-size: 0.95rem;
+  color: var(--bg);
+  background: var(--text);
+  border: 1px solid var(--text);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+#search-btn:hover {
+  background: #333;
+}
+
+.result {
+  margin-top: 12px;
+  min-height: 1.2em;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 0.9rem;
+  color: var(--text);
+  cursor: pointer;
+}
+
+/* Small label at the top of the dropdown when it shows trending searches. */
+.dropdown-header {
+  padding: 10px 14px 4px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}

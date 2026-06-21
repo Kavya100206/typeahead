@@ -1,0 +1,35 @@
+# --- Project-private docs (personal study plan, not for the public repo) ---
+CONTEXT.md
+PHASES.md
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# --- Node / TypeScript ---
+node_modules/
+# Compiled TS output; rebuilt with `npm run build`.
+frontend/dist/
+*.tsbuildinfo
+
+# --- Data ---
+# Binary SQLite DB, rebuilt from queries.csv via `python -m app.ingest`.
+backend/data/queries.db
+# Keep queries.csv tracked so the app runs out of the box. To regenerate it
+# instead, uncomment the next line and run scripts/generate_dataset.py.
+# backend/data/queries.csv
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log

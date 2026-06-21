@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Search Typeahead</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="page">
+      <h1>Search</h1>
+
+      <!-- The search box and the dropdown are siblings inside a positioned
+           wrapper, so the dropdown can sit directly under the input. -->
+      <div class="search-row">
+        <div class="search-wrap">
+          <input
+            id="search"
+            type="text"
+            placeholder="Start typing..."
+            autocomplete="off"
+            aria-label="Search"
+          />
+          <!-- Filled in by ui.ts. Empty and hidden until there is something to show. -->
+          <div id="suggestions" class="suggestions"></div>
+        </div>
+        <button id="search-btn" type="button">Search</button>
+      </div>
+
+      <!-- Toggle between basic (all-time) and enhanced (recency-aware) ranking. -->
+      <label class="toggle">
+        <input id="enhanced-toggle" type="checkbox" />
+        Recency-aware ranking (enhanced)
+      </label>
+
+      <!-- Shows the POST /search response so a submit is visible. -->
+      <div id="result" class="result"></div>
+    </main>
+
+    <!-- Native ES module. Loads the compiled output of src/main.ts.
+         The ?v query is a cache-buster: bump it after a rebuild so the browser
+         fetches the new file instead of serving a stale cached copy. -->
+    <script type="module" src="./dist/main.js?v=4"></script>
+  </body>
+</html>
